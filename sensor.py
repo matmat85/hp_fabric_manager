@@ -36,6 +36,10 @@ SENSORS = [
     _SensorDesc("last_learn_at", "Last Learn", None, SensorDeviceClass.TIMESTAMP),
     _SensorDesc("last_learn_offset_c", "Last Learn Offset", "°C", SensorDeviceClass.TEMPERATURE),
     _SensorDesc("last_learn_power_w", "Last Learn Power", "W", SensorDeviceClass.POWER),
+    # Kick debug telemetry
+    _SensorDesc("kick_debug_next_sp", "Kick Debug Next SP", "°C", SensorDeviceClass.TEMPERATURE),
+    _SensorDesc("kick_debug_waited_s", "Kick Debug Waited Seconds", "s", None),
+    _SensorDesc("kick_debug_cooldown_s", "Kick Debug Cooldown Seconds", "s", None),
 ]
 
 
@@ -89,6 +93,22 @@ class HpfmZoneSensor(SensorEntity):
             return int(getattr(z.rt, "learn_updates", 0) or 0)
         if self._sd.key == "last_learn_at":
             return getattr(z.rt, "last_learn_at", None)
+        # Kick debug sensors
+        if self._sd.key == "kick_debug_next_sp":
+            v = getattr(z.rt, "kick_debug_next_sp", None)
+            if v is not None:
+                return round(v, 2)
+            return None
+        if self._sd.key == "kick_debug_waited_s":
+            v = getattr(z.rt, "kick_debug_waited_s", None)
+            if v is not None:
+                return int(v)
+            return None
+        if self._sd.key == "kick_debug_cooldown_s":
+            v = getattr(z.rt, "kick_debug_cooldown_s", None)
+            if v is not None:
+                return int(v)
+            return None
         v = getattr(z.rt, self._sd.key, None)
         if isinstance(v, float):
             return round(v, 2)

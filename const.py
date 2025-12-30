@@ -14,6 +14,13 @@ DEFAULT_SETPOINT_MIN_C = 16.0
 DEFAULT_SETPOINT_MAX_C = 32.0
 DEFAULT_HEATING_START_HOLD_SECONDS = 120
 
+# If the room is below target but the heat pump appears "satisfied" (fan-only/idle),
+# we may need to temporarily push setpoint higher to re-engage heating.
+DEFAULT_NONHEATING_KICK_AFTER_SECONDS = 60
+DEFAULT_NONHEATING_KICK_STEP_C = 1.0
+DEFAULT_NONHEATING_KICK_COOLDOWN_SECONDS = 600
+DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C = 2.0
+
 # Learning defaults
 DEFAULT_K_W_PER_DEG = 200.0  # initial guess: +1C offset -> +200W
 DEFAULT_BIAS_W = 0.0         # baseline

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,10 @@ from .const import (
     DEFAULT_SETPOINT_MIN_C,
     DEFAULT_SETPOINT_MAX_C,
     DEFAULT_HEATING_START_HOLD_SECONDS,
+    DEFAULT_NONHEATING_KICK_AFTER_SECONDS,
+    DEFAULT_NONHEATING_KICK_STEP_C,
+    DEFAULT_NONHEATING_KICK_COOLDOWN_SECONDS,
+    DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C,
     LEARN_MIN_OFFSET_C,
     LEARN_MIN_POWER_W,
     POWER_IDLE_MAX_W,
@@ -75,6 +80,11 @@ class ZoneRuntime:
     power_state: str | None = None
     last_power_state: str | None = None
     heating_start_hold_until: Any = None
+    nonheating_below_target_since: Any = None
+    last_kick_at: Any = None
+    kick_debug_next_sp: float | None = None
+    kick_debug_waited_s: float | None = None
+    kick_debug_cooldown_s: float | None = None
     predicted_power_w: float | None = None
     last_applied_setpoint_c: float | None = None
     last_setpoint_request_c: float | None = None
@@ -209,6 +219,23 @@ class HeatPumpZone:
         sp_q = ticks * step
         return round(sp_q, 3)
 
+    def _clamp_setpoint_up(self, sp: float) -> float:
+        """Clamp like _clamp_setpoint, but quantize upward to the next device step.
+
+        Used for "kick" behavior where rounding down would defeat the purpose.
+        """
+        min_temp = self.rt.climate_min_temp_c if self.rt.climate_min_temp_c is not None else DEFAULT_SETPOINT_MIN_C
+        max_temp = self.rt.climate_max_temp_c if self.rt.climate_max_temp_c is not None else DEFAULT_SETPOINT_MAX_C
+        sp = max(min_temp, min(max_temp, sp))
+
+        step = self.rt.climate_target_temp_step_c
+        if step is None or step <= 0 or step > 5:
+            step = 1.0
+
+        ticks = math.ceil(sp / step)
+        sp_q = ticks * step
+        return round(sp_q, 3)
+
     def _ramp(
         self,
         desired: float,
@@ -220,10 +247,12 @@ class HeatPumpZone:
     ) -> float:
         if current is None:
             return desired
-        # Respect device step size where possible (many heat pumps are 1.0°C only).
-        step = DEFAULT_MAX_SETPOINT_STEP_C_PER_UPDATE
-        if self.rt.climate_target_temp_step_c is not None and 0 < self.rt.climate_target_temp_step_c <= 5:
-            step = max(step, self.rt.climate_target_temp_step_c)
+        # Respect device step size where possible.
+        # Many heat pumps are whole-degree only; default to 1.0°C when unknown to avoid half-step churn.
+        device_step = self.rt.climate_target_temp_step_c
+        if device_step is None or device_step <= 0 or device_step > 5:
+            device_step = 1.0
+        step = max(DEFAULT_MAX_SETPOINT_STEP_C_PER_UPDATE, device_step)
         # Fast ramp: when the room is well below target and the unit isn't actually heating yet,
         # jump faster to a higher setpoint to start the compressor.
         if error_c >= fast_ramp_error_threshold_c and (power_state is None or power_state in {"idle", "fan_only", "transition"}):
@@ -348,6 +377,8 @@ class HeatPumpZone:
         target = self.rt.target_room_temp
         error = target - room_temp
 
+        kicked = False
+
         if error <= 0:
             # Room is at/above target: drive setpoint back down to target.
             desired_setpoint = self._clamp_setpoint(target)
@@ -381,8 +412,52 @@ class HeatPumpZone:
             desired_setpoint = self._clamp_setpoint(target + offset)
             self.rt.desired_setpoint_c = desired_setpoint
 
+        # Track the "below target but not heating" condition.
+        now = dt_util.utcnow()
+        nonheating = self.rt.power_state in {None, "idle", "fan_only", "transition"}
+        if error > 0 and nonheating:
+            if self.rt.nonheating_below_target_since is None:
+                self.rt.nonheating_below_target_since = now
+        else:
+            self.rt.nonheating_below_target_since = None
+
         # Ramp from current setpoint (or last applied)
         current_sp = setpoint if setpoint is not None else self.rt.last_applied_setpoint_c
+
+        # If we're below target but the heat pump is staying fan-only/idle AND we're already at the
+        # computed desired setpoint (often quantized to 1°C), apply a temporary "kick" upwards.
+        # This helps overcome device hysteresis / internal satisfaction logic.
+        if (
+            error > 0
+            and nonheating
+            and current_sp is not None
+            and self.rt.nonheating_below_target_since is not None
+            and (now - self.rt.nonheating_below_target_since).total_seconds() >= DEFAULT_NONHEATING_KICK_AFTER_SECONDS
+            and (
+                self.rt.last_kick_at is None
+                or (now - self.rt.last_kick_at).total_seconds() >= DEFAULT_NONHEATING_KICK_COOLDOWN_SECONDS
+            )
+        ):
+            device_step = self.rt.climate_target_temp_step_c
+            if device_step is None or device_step <= 0 or device_step > 5:
+                device_step = 1.0
+            kick_step = max(device_step, DEFAULT_NONHEATING_KICK_STEP_C)
+
+            # Never exceed target + max_offset_c.
+            max_allowed_sp = target + float(self.rt.max_offset_c)
+
+            # Two things can keep a compressor from starting:
+            # 1) we're already at the computed desired setpoint (esp. 1°C-quantized devices)
+            # 2) the unit wants a larger offset above current room temp before engaging
+            kick_target_sp = max(
+                max(desired_setpoint, current_sp) + kick_step,
+                room_temp + DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C,
+            )
+            kick_target_sp = min(kick_target_sp, max_allowed_sp)
+            desired_setpoint = self._clamp_setpoint_up(kick_target_sp)
+            self.rt.desired_setpoint_c = desired_setpoint
+            self.rt.last_kick_at = now
+            kicked = True
 
         # During the hold window after heating starts, don't increase setpoint further.
         # Allow decreases (e.g., if we overshot or target dropped).
@@ -413,9 +488,9 @@ class HeatPumpZone:
 
         # Avoid spam: only apply if it changes meaningfully
         if current_sp is None or abs(ramped_q - current_sp) >= 0.25:
-            self.rt.control_status = "will_apply"
+            self.rt.control_status = "kick_will_apply" if kicked else "will_apply"
             await self.async_apply_setpoint(ramped_q)
         else:
-            self.rt.control_status = "no_change"
+            self.rt.control_status = "kick_no_change" if kicked else "no_change"
 
         self.rt.last_update = dt_util.utcnow()
