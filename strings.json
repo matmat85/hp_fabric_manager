@@ -1,0 +1,76 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Heat Pump Fabric Manager",
+        "description": "Configure the integration",
+        "data": {
+          "name": "Name",
+          "scan_interval_seconds": "Scan interval (seconds)"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only a single instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "title": "Manage Heat Pump Fabric Manager",
+        "menu_options": {
+          "add_zone": "Add Zone",
+          "modify_settings": "Modify Settings",
+          "edit_zone": "Edit Zone"
+        }
+      },
+      "edit_zone": {
+        "title": "Edit Zone",
+        "description": "Select a zone to edit",
+        "data": {
+          "zone_id": "Zone"
+        }
+      },
+      "edit_zone_details": {
+        "title": "Edit Zone",
+        "description": "Update zone mappings and settings",
+        "data": {
+          "climate_entity": "Climate Entity",
+          "room_temp_sensors": "Room Temperature Sensors",
+          "power_sensor": "Power Sensor (optional)",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor (optional)",
+          "outdoor_humidity_sensor": "Outdoor Humidity Sensor (optional)",
+          "wind_speed_sensor": "Wind Speed Sensor (optional)",
+          "enabled": "Enabled",
+          "target_room_temp": "Target Room Temperature (°C)",
+          "min_offset_c": "Minimum Offset (°C)",
+          "max_offset_c": "Maximum Offset (°C)"
+        }
+      },
+      "add_zone": {
+        "title": "Add Zone",
+        "description": "Configure a new zone",
+        "data": {
+          "zone_name": "Zone Name",
+          "climate_entity": "Climate Entity",
+          "room_temp_sensors": "Room Temperature Sensors",
+          "power_sensor": "Power Sensor (optional)",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor (optional)",
+          "outdoor_humidity_sensor": "Outdoor Humidity Sensor (optional)",
+          "wind_speed_sensor": "Wind Speed Sensor (optional)",
+          "enabled": "Enabled",
+          "target_room_temp": "Target Room Temperature (°C)",
+          "min_offset_c": "Minimum Offset (°C)",
+          "max_offset_c": "Maximum Offset (°C)"
+        }
+      },
+      "modify_settings": {
+        "title": "Modify Settings",
+        "description": "Change global settings",
+        "data": {
+          "scan_interval_seconds": "Scan interval (seconds)"
+        }
+      }
+    }
+  }
+}
