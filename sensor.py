@@ -23,6 +23,9 @@ class _SensorDesc:
 
 SENSORS = [
     _SensorDesc("room_temp_c", "Room Temp", "°C", SensorDeviceClass.TEMPERATURE),
+    _SensorDesc("temp_error_c", "Temp Error", "°C", SensorDeviceClass.TEMPERATURE),
+    _SensorDesc("outdoor_temp_c", "Outdoor Temp", "°C", SensorDeviceClass.TEMPERATURE),
+    _SensorDesc("wind_speed", "Wind Speed", None, None),  # Units vary by source
     _SensorDesc("actual_power_w", "Actual Power", "W", SensorDeviceClass.POWER),
     _SensorDesc("predicted_power_w", "Predicted Power", "W", SensorDeviceClass.POWER),
     _SensorDesc("power_state", "Power State", None, None),
@@ -33,13 +36,15 @@ SENSORS = [
     _SensorDesc("ramped_setpoint_c", "Ramped Setpoint", "°C", SensorDeviceClass.TEMPERATURE),
     _SensorDesc("control_status", "Control Status", None, None),
     _SensorDesc("learn_updates", "Learn Updates", None, None),
+    _SensorDesc("model_status", "Model Status", None, None),
     _SensorDesc("last_learn_at", "Last Learn", None, SensorDeviceClass.TIMESTAMP),
     _SensorDesc("last_learn_offset_c", "Last Learn Offset", "°C", SensorDeviceClass.TEMPERATURE),
     _SensorDesc("last_learn_power_w", "Last Learn Power", "W", SensorDeviceClass.POWER),
     # Kick debug telemetry
-    _SensorDesc("kick_debug_next_sp", "Kick Debug Next SP", "°C", SensorDeviceClass.TEMPERATURE),
+    _SensorDesc("kick_setpoint_c", "Kick Setpoint", "°C", SensorDeviceClass.TEMPERATURE),
     _SensorDesc("kick_debug_waited_s", "Kick Debug Waited Seconds", "s", None),
-    _SensorDesc("kick_debug_cooldown_s", "Kick Debug Cooldown Seconds", "s", None),
+    _SensorDesc("kick_debug_since_last_kick_s", "Kick Debug Since Last Kick", "s", None),
+    _SensorDesc("last_action_was_kick", "Last Action Was Kick", None, None),
 ]
 
 

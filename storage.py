@@ -20,13 +20,26 @@ class LearnedModel:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "LearnedModel":
-        return cls(
-            k_w_per_deg=float(d.get("k_w_per_deg", 0.0)),
-            bias_w=float(d.get("bias_w", 0.0)),
-        )
+        k = float(d.get("k_w_per_deg", 0.0))
+        bias = float(d.get("bias_w", 0.0))
+
+        # Validate loaded values - reject unreasonable ones
+        # k should be positive and reasonable (0 to 2000 W/°C)
+        # bias should be reasonable (-500 to 1500 W)
+        if k < 0 or k > 2000:
+            k = 0.0  # Will use defaults
+        if bias < -500 or bias > 1500:
+            bias = 0.0  # Will use defaults
+
+        return cls(k_w_per_deg=k, bias_w=bias)
 
     def to_dict(self) -> dict[str, Any]:
         return {"k_w_per_deg": self.k_w_per_deg, "bias_w": self.bias_w}
+
+    def is_valid(self) -> bool:
+        """Check if the model has reasonable learned values."""
+        # A model with k=0 or very negative bias is essentially untrained
+        return self.k_w_per_deg > 10 and self.bias_w >= -100
 
 
 class LearnedStore:

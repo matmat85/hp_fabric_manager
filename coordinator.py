@@ -49,9 +49,10 @@ class HpfmCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
             learned = self.store.get_zone_model(zone_id)
-            if learned:
+            if learned and learned.is_valid():
                 rt.model.k_w_per_deg = learned.k_w_per_deg
                 rt.model.bias_w = learned.bias_w
+            # If learned model is invalid or missing, keep defaults from ZoneRuntime
 
             self.zones[zone_id] = HeatPumpZone(self.hass, self.entry.entry_id, zone_id, cfg, rt)
 

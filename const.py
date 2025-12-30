@@ -14,12 +14,13 @@ DEFAULT_SETPOINT_MIN_C = 16.0
 DEFAULT_SETPOINT_MAX_C = 32.0
 DEFAULT_HEATING_START_HOLD_SECONDS = 120
 
-# If the room is below target but the heat pump appears "satisfied" (fan-only/idle),
+# If the room is below target but the heat pump appears "satisfied" (fan-only/idle/anti-draft),
 # we may need to temporarily push setpoint higher to re-engage heating.
-DEFAULT_NONHEATING_KICK_AFTER_SECONDS = 60
-DEFAULT_NONHEATING_KICK_STEP_C = 1.0
-DEFAULT_NONHEATING_KICK_COOLDOWN_SECONDS = 600
-DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C = 2.0
+# Progressive kick: start kicking after KICK_AFTER_SECONDS, then every KICK_INTERVAL_SECONDS
+# bump the setpoint up by device_step (typically 1°C) until heating starts or we hit max_offset.
+DEFAULT_NONHEATING_KICK_AFTER_SECONDS = 45  # initial wait before first kick
+DEFAULT_NONHEATING_KICK_INTERVAL_SECONDS = 60  # time between progressive kicks
+DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C = 2.5  # minimum offset above room temp for first kick
 
 # Learning defaults
 DEFAULT_K_W_PER_DEG = 200.0  # initial guess: +1C offset -> +200W
@@ -28,9 +29,11 @@ EMA_ALPHA = 0.08             # how fast we learn (0..1). small = slow & stable
 
 # Power-state heuristics (based on typical heat pump behavior)
 # - ~2-5W: idle/standby
-# - ~10-65W: fan-only / satisfied circulation
+# - ~5-20W: anti-draft mode (thinks room is at setpoint, fan off to prevent drafts)
+# - ~20-65W: fan-only / satisfied circulation
 # - >=100W: compressor/heating is actually running
 POWER_IDLE_MAX_W = 5.0
+POWER_ANTI_DRAFT_MAX_W = 20.0
 POWER_FAN_ONLY_MAX_W = 65.0
 POWER_HEATING_MIN_W = 100.0
 

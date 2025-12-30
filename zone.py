@@ -23,12 +23,12 @@ from .const import (
     DEFAULT_SETPOINT_MAX_C,
     DEFAULT_HEATING_START_HOLD_SECONDS,
     DEFAULT_NONHEATING_KICK_AFTER_SECONDS,
-    DEFAULT_NONHEATING_KICK_STEP_C,
-    DEFAULT_NONHEATING_KICK_COOLDOWN_SECONDS,
+    DEFAULT_NONHEATING_KICK_INTERVAL_SECONDS,
     DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C,
     LEARN_MIN_OFFSET_C,
     LEARN_MIN_POWER_W,
     POWER_IDLE_MAX_W,
+    POWER_ANTI_DRAFT_MAX_W,
     POWER_FAN_ONLY_MAX_W,
     POWER_HEATING_MIN_W,
 )
@@ -70,6 +70,9 @@ class ZoneRuntime:
 
     # telemetry
     room_temp_c: float | None = None
+    outdoor_temp_c: float | None = None
+    wind_speed: float | None = None
+    temp_error_c: float | None = None  # target - room_temp (positive = need heat)
     climate_setpoint_c: float | None = None
     climate_mode: str | None = None
     fan_mode: str | None = None
@@ -82,9 +85,10 @@ class ZoneRuntime:
     heating_start_hold_until: Any = None
     nonheating_below_target_since: Any = None
     last_kick_at: Any = None
-    kick_debug_next_sp: float | None = None
+    kick_setpoint_c: float | None = None  # the setpoint from the last kick (to hold it)
     kick_debug_waited_s: float | None = None
-    kick_debug_cooldown_s: float | None = None
+    kick_debug_since_last_kick_s: float | None = None
+    last_action_was_kick: bool = False
     predicted_power_w: float | None = None
     last_applied_setpoint_c: float | None = None
     last_setpoint_request_c: float | None = None
@@ -102,6 +106,18 @@ class ZoneRuntime:
     last_learn_at: Any = None
     last_learn_offset_c: float | None = None
     last_learn_power_w: float | None = None
+
+    @property
+    def model_status(self) -> str:
+        """Return a status string for the learned model."""
+        if self.learn_updates == 0:
+            return "untrained"
+        elif self.learn_updates < 10:
+            return "learning"
+        elif self.learn_updates < 50:
+            return "warming_up"
+        else:
+            return "trained"
 
 
 class HeatPumpZone:
@@ -255,7 +271,7 @@ class HeatPumpZone:
         step = max(DEFAULT_MAX_SETPOINT_STEP_C_PER_UPDATE, device_step)
         # Fast ramp: when the room is well below target and the unit isn't actually heating yet,
         # jump faster to a higher setpoint to start the compressor.
-        if error_c >= fast_ramp_error_threshold_c and (power_state is None or power_state in {"idle", "fan_only", "transition"}):
+        if error_c >= fast_ramp_error_threshold_c and (power_state is None or power_state in {"idle", "anti_draft", "fan_only", "transition"}):
             step = max(step, 2.0)
 
         if desired > current + step:
@@ -309,6 +325,16 @@ class HeatPumpZone:
         outdoor_temp_c = self._read_outdoor_temp_c()
         wind_speed = self._read_wind_speed()
 
+        # Store outdoor conditions for visibility
+        self.rt.outdoor_temp_c = outdoor_temp_c
+        self.rt.wind_speed = wind_speed
+
+        # Calculate and store temperature error
+        if room_temp is not None:
+            self.rt.temp_error_c = self.rt.target_room_temp - room_temp
+        else:
+            self.rt.temp_error_c = None
+
         setpoint, hvac_mode, fan_mode, _current_temp, target_step, min_temp, max_temp = self._read_climate()
         self.rt.climate_setpoint_c = setpoint
         self.rt.climate_mode = hvac_mode
@@ -332,6 +358,8 @@ class HeatPumpZone:
             self.rt.power_state = None
         elif power_w <= POWER_IDLE_MAX_W:
             self.rt.power_state = "idle"
+        elif power_w <= POWER_ANTI_DRAFT_MAX_W:
+            self.rt.power_state = "anti_draft"
         elif power_w <= POWER_FAN_ONLY_MAX_W:
             self.rt.power_state = "fan_only"
         elif power_w >= POWER_HEATING_MIN_W:
@@ -341,8 +369,12 @@ class HeatPumpZone:
 
         # If we just transitioned into heating, hold further upward ramping briefly.
         # Heat pumps can take a bit to respond; this avoids repeatedly bumping setpoint every 30s.
-        if self.rt.power_state == "heating" and prev_power_state in {None, "idle", "fan_only", "transition"}:
+        if self.rt.power_state == "heating" and prev_power_state in {None, "idle", "anti_draft", "fan_only", "transition"}:
             self.rt.heating_start_hold_until = dt_util.utcnow() + timedelta(seconds=DEFAULT_HEATING_START_HOLD_SECONDS)
+            # Kick succeeded! Clear kick state so we return to normal control.
+            if self.rt.kick_setpoint_c is not None:
+                self.rt.kick_setpoint_c = None
+                self.rt.last_kick_at = None
         self.rt.last_power_state = prev_power_state
 
         if room_temp is not None and setpoint is not None and power_w is not None:
@@ -386,10 +418,12 @@ class HeatPumpZone:
         else:
             if error < 0.5:
                 base_offset = max(self.rt.min_offset_c, 0.4)
-            elif error < 1.5:
+            elif error < 1.0:
                 base_offset = max(self.rt.min_offset_c, 0.8)
+            elif error < 1.5:
+                base_offset = max(self.rt.min_offset_c, 1.2)
             else:
-                base_offset = max(self.rt.min_offset_c, 1.4)
+                base_offset = max(self.rt.min_offset_c, 1.6)
 
             # Outdoor-aware aggressiveness: colder/windier outside => slightly larger offset.
             # These are small nudges; min/max still apply.
@@ -414,7 +448,7 @@ class HeatPumpZone:
 
         # Track the "below target but not heating" condition.
         now = dt_util.utcnow()
-        nonheating = self.rt.power_state in {None, "idle", "fan_only", "transition"}
+        nonheating = self.rt.power_state in {None, "idle", "anti_draft", "fan_only", "transition"}
         if error > 0 and nonheating:
             if self.rt.nonheating_below_target_since is None:
                 self.rt.nonheating_below_target_since = now
@@ -424,40 +458,78 @@ class HeatPumpZone:
         # Ramp from current setpoint (or last applied)
         current_sp = setpoint if setpoint is not None else self.rt.last_applied_setpoint_c
 
-        # If we're below target but the heat pump is staying fan-only/idle AND we're already at the
-        # computed desired setpoint (often quantized to 1°C), apply a temporary "kick" upwards.
-        # This helps overcome device hysteresis / internal satisfaction logic.
-        if (
+        # Update kick debug info
+        if self.rt.nonheating_below_target_since is not None:
+            self.rt.kick_debug_waited_s = (now - self.rt.nonheating_below_target_since).total_seconds()
+        else:
+            self.rt.kick_debug_waited_s = None
+
+        if self.rt.last_kick_at is not None:
+            self.rt.kick_debug_since_last_kick_s = (now - self.rt.last_kick_at).total_seconds()
+        else:
+            self.rt.kick_debug_since_last_kick_s = None
+
+        # Progressive kick logic: if we're below target but heat pump won't start,
+        # progressively increase setpoint every KICK_INTERVAL_SECONDS until heating starts.
+        # Once heating is confirmed (handled above where power_state becomes "heating"),
+        # kick_setpoint_c is cleared and we return to normal control.
+        max_allowed_sp = target + float(self.rt.max_offset_c)
+        device_step = self.rt.climate_target_temp_step_c
+        if device_step is None or device_step <= 0 or device_step > 5:
+            device_step = 1.0
+
+        # Determine if we should kick (first kick or progressive kick)
+        should_first_kick = (
             error > 0
             and nonheating
             and current_sp is not None
+            and self.rt.kick_setpoint_c is None  # not already in kick mode
             and self.rt.nonheating_below_target_since is not None
             and (now - self.rt.nonheating_below_target_since).total_seconds() >= DEFAULT_NONHEATING_KICK_AFTER_SECONDS
-            and (
-                self.rt.last_kick_at is None
-                or (now - self.rt.last_kick_at).total_seconds() >= DEFAULT_NONHEATING_KICK_COOLDOWN_SECONDS
-            )
-        ):
-            device_step = self.rt.climate_target_temp_step_c
-            if device_step is None or device_step <= 0 or device_step > 5:
-                device_step = 1.0
-            kick_step = max(device_step, DEFAULT_NONHEATING_KICK_STEP_C)
+        )
 
-            # Never exceed target + max_offset_c.
-            max_allowed_sp = target + float(self.rt.max_offset_c)
+        should_progressive_kick = (
+            error > 0
+            and nonheating
+            and current_sp is not None
+            and self.rt.kick_setpoint_c is not None  # already in kick mode
+            and self.rt.last_kick_at is not None
+            and (now - self.rt.last_kick_at).total_seconds() >= DEFAULT_NONHEATING_KICK_INTERVAL_SECONDS
+            and self.rt.kick_setpoint_c < max_allowed_sp  # room to increase
+        )
 
-            # Two things can keep a compressor from starting:
-            # 1) we're already at the computed desired setpoint (esp. 1°C-quantized devices)
-            # 2) the unit wants a larger offset above current room temp before engaging
+        if should_first_kick:
+            # First kick: jump to ensure offset above room temp
             kick_target_sp = max(
-                max(desired_setpoint, current_sp) + kick_step,
+                desired_setpoint + device_step,
                 room_temp + DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C,
             )
             kick_target_sp = min(kick_target_sp, max_allowed_sp)
-            desired_setpoint = self._clamp_setpoint_up(kick_target_sp)
-            self.rt.desired_setpoint_c = desired_setpoint
+            kick_sp = self._clamp_setpoint_up(kick_target_sp)
+            self.rt.kick_setpoint_c = kick_sp
             self.rt.last_kick_at = now
+            desired_setpoint = kick_sp
+            self.rt.desired_setpoint_c = desired_setpoint
             kicked = True
+        elif should_progressive_kick:
+            # Progressive kick: bump up by one step
+            kick_target_sp = min(self.rt.kick_setpoint_c + device_step, max_allowed_sp)
+            kick_sp = self._clamp_setpoint_up(kick_target_sp)
+            self.rt.kick_setpoint_c = kick_sp
+            self.rt.last_kick_at = now
+            desired_setpoint = kick_sp
+            self.rt.desired_setpoint_c = desired_setpoint
+            kicked = True
+        elif self.rt.kick_setpoint_c is not None and nonheating and error > 0:
+            # In kick mode but not time for next progressive kick yet - hold the kick setpoint
+            desired_setpoint = self.rt.kick_setpoint_c
+            self.rt.desired_setpoint_c = desired_setpoint
+        else:
+            # Not in kick mode, or room reached target, or heating started
+            if self.rt.kick_setpoint_c is not None and (not nonheating or error <= 0):
+                # Clear kick mode - either heating started or room is satisfied
+                self.rt.kick_setpoint_c = None
+                self.rt.last_kick_at = None
 
         # During the hold window after heating starts, don't increase setpoint further.
         # Allow decreases (e.g., if we overshot or target dropped).
@@ -486,11 +558,26 @@ class HeatPumpZone:
         ramped_q = self._clamp_setpoint(ramped)
         self.rt.ramped_setpoint_c = ramped_q
 
+        # Determine control status
+        in_kick_hold = self.rt.kick_setpoint_c is not None and not kicked
+
         # Avoid spam: only apply if it changes meaningfully
         if current_sp is None or abs(ramped_q - current_sp) >= 0.25:
-            self.rt.control_status = "kick_will_apply" if kicked else "will_apply"
+            if kicked:
+                self.rt.control_status = "kick_applied"
+            elif in_kick_hold:
+                self.rt.control_status = "kick_hold"
+            else:
+                self.rt.control_status = "applied"
+            self.rt.last_action_was_kick = kicked
             await self.async_apply_setpoint(ramped_q)
         else:
-            self.rt.control_status = "kick_no_change" if kicked else "no_change"
+            if kicked:
+                self.rt.control_status = "kick_no_change"
+            elif in_kick_hold:
+                self.rt.control_status = "kick_hold"
+            else:
+                self.rt.control_status = "no_change"
+            self.rt.last_action_was_kick = False
 
         self.rt.last_update = dt_util.utcnow()

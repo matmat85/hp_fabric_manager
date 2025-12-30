@@ -12,7 +12,8 @@ class LinearPowerModel:
     bias_w: float
 
     def predict(self, offset_c: float) -> float:
-        return self.bias_w + self.k_w_per_deg * offset_c
+        # Floor at 0 - power can't be negative
+        return max(0.0, self.bias_w + self.k_w_per_deg * offset_c)
 
     def update_ema(self, offset_c: float, power_w: float) -> None:
         """
