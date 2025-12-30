@@ -369,27 +369,20 @@ class HeatPumpZone:
         else:
             self.rt.power_state = "transition"
 
-        # Detect warmup: HP transitioning from idle/anti_draft to high power (heating).
-        # The compressor starts immediately (~500W) but the fan stays off for ~2 min while it warms up.
-        # During this time, don't clear the kick - wait for warmup to complete.
-        if self.rt.power_state == "heating" and prev_power_state in {None, "idle", "anti_draft"}:
-            # Just jumped to high power - start warmup hold
-            self.rt.warmup_hold_until = dt_util.utcnow() + timedelta(seconds=DEFAULT_WARMUP_HOLD_SECONDS)
-            self.rt.heating_start_hold_until = dt_util.utcnow() + timedelta(seconds=DEFAULT_HEATING_START_HOLD_SECONDS)
+        # Detect warmup: when HP leaves anti_draft, the compressor is starting.
+        # Hold the setpoint for 2 min to let it warm up before making further changes.
+        now_ts = dt_util.utcnow()
+        if prev_power_state == "anti_draft" and self.rt.power_state != "anti_draft":
+            self.rt.warmup_hold_until = now_ts + timedelta(seconds=DEFAULT_WARMUP_HOLD_SECONDS)
 
         # If HP drops back to idle/anti_draft, warmup failed - clear the hold
         if self.rt.power_state in {"idle", "anti_draft"} and self.rt.warmup_hold_until is not None:
             self.rt.warmup_hold_until = None
 
-        # Warmup complete: if warmup_hold has expired and we're still heating, clear kick state
-        now_ts = dt_util.utcnow()
-        if (
-            self.rt.power_state == "heating"
-            and self.rt.warmup_hold_until is not None
-            and now_ts >= self.rt.warmup_hold_until
-        ):
-            # Warmup finished and still heating - kick succeeded!
+        # Warmup complete: if warmup_hold has expired, clear kick state (HP is now heating)
+        if self.rt.warmup_hold_until is not None and now_ts >= self.rt.warmup_hold_until:
             self.rt.warmup_hold_until = None
+            self.rt.heating_start_hold_until = now_ts + timedelta(seconds=DEFAULT_HEATING_START_HOLD_SECONDS)
             if self.rt.kick_setpoint_c is not None:
                 self.rt.kick_setpoint_c = None
                 self.rt.last_kick_at = None
