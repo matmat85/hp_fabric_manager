@@ -40,11 +40,12 @@ SENSORS = [
     _SensorDesc("last_learn_at", "Last Learn", None, SensorDeviceClass.TIMESTAMP),
     _SensorDesc("last_learn_offset_c", "Last Learn Offset", "°C", SensorDeviceClass.TEMPERATURE),
     _SensorDesc("last_learn_power_w", "Last Learn Power", "W", SensorDeviceClass.POWER),
-    # Kick debug telemetry
+    # Kick/warmup debug telemetry
     _SensorDesc("kick_setpoint_c", "Kick Setpoint", "°C", SensorDeviceClass.TEMPERATURE),
     _SensorDesc("kick_debug_waited_s", "Kick Debug Waited Seconds", "s", None),
     _SensorDesc("kick_debug_since_last_kick_s", "Kick Debug Since Last Kick", "s", None),
     _SensorDesc("last_action_was_kick", "Last Action Was Kick", None, None),
+    _SensorDesc("warmup_hold_until", "Warmup Hold Until", None, SensorDeviceClass.TIMESTAMP),
 ]
 
 

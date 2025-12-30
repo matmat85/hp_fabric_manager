@@ -22,6 +22,7 @@ from .const import (
     DEFAULT_SETPOINT_MIN_C,
     DEFAULT_SETPOINT_MAX_C,
     DEFAULT_HEATING_START_HOLD_SECONDS,
+    DEFAULT_WARMUP_HOLD_SECONDS,
     DEFAULT_NONHEATING_KICK_AFTER_SECONDS,
     DEFAULT_NONHEATING_KICK_INTERVAL_SECONDS,
     DEFAULT_NONHEATING_MIN_ENGAGE_OFFSET_C,
@@ -83,6 +84,7 @@ class ZoneRuntime:
     power_state: str | None = None
     last_power_state: str | None = None
     heating_start_hold_until: Any = None
+    warmup_hold_until: Any = None  # hold setpoint while HP is warming up
     nonheating_below_target_since: Any = None
     last_kick_at: Any = None
     kick_setpoint_c: float | None = None  # the setpoint from the last kick (to hold it)
@@ -367,14 +369,31 @@ class HeatPumpZone:
         else:
             self.rt.power_state = "transition"
 
-        # If we just transitioned into heating, hold further upward ramping briefly.
-        # Heat pumps can take a bit to respond; this avoids repeatedly bumping setpoint every 30s.
-        if self.rt.power_state == "heating" and prev_power_state in {None, "idle", "anti_draft", "fan_only", "transition"}:
+        # Detect warmup: HP transitioning from idle/anti_draft to high power (heating).
+        # The compressor starts immediately (~500W) but the fan stays off for ~2 min while it warms up.
+        # During this time, don't clear the kick - wait for warmup to complete.
+        if self.rt.power_state == "heating" and prev_power_state in {None, "idle", "anti_draft"}:
+            # Just jumped to high power - start warmup hold
+            self.rt.warmup_hold_until = dt_util.utcnow() + timedelta(seconds=DEFAULT_WARMUP_HOLD_SECONDS)
             self.rt.heating_start_hold_until = dt_util.utcnow() + timedelta(seconds=DEFAULT_HEATING_START_HOLD_SECONDS)
-            # Kick succeeded! Clear kick state so we return to normal control.
+
+        # If HP drops back to idle/anti_draft, warmup failed - clear the hold
+        if self.rt.power_state in {"idle", "anti_draft"} and self.rt.warmup_hold_until is not None:
+            self.rt.warmup_hold_until = None
+
+        # Warmup complete: if warmup_hold has expired and we're still heating, clear kick state
+        now_ts = dt_util.utcnow()
+        if (
+            self.rt.power_state == "heating"
+            and self.rt.warmup_hold_until is not None
+            and now_ts >= self.rt.warmup_hold_until
+        ):
+            # Warmup finished and still heating - kick succeeded!
+            self.rt.warmup_hold_until = None
             if self.rt.kick_setpoint_c is not None:
                 self.rt.kick_setpoint_c = None
                 self.rt.last_kick_at = None
+
         self.rt.last_power_state = prev_power_state
 
         if room_temp is not None and setpoint is not None and power_w is not None:
@@ -448,11 +467,17 @@ class HeatPumpZone:
 
         # Track the "below target but not heating" condition.
         now = dt_util.utcnow()
+        # During warmup, power_state is "heating" but HP isn't actually delivering heat yet (fan off).
+        # Treat warmup as non-heating for kick logic, but don't reset timers during warmup.
+        in_warmup = self.rt.warmup_hold_until is not None and now < self.rt.warmup_hold_until
         nonheating = self.rt.power_state in {None, "idle", "anti_draft", "fan_only", "transition"}
-        if error > 0 and nonheating:
+
+        # Don't reset nonheating timer during warmup - HP isn't actually heating yet
+        if error > 0 and (nonheating or in_warmup):
             if self.rt.nonheating_below_target_since is None:
                 self.rt.nonheating_below_target_since = now
-        else:
+        elif not in_warmup:
+            # Only clear the timer if we're genuinely heating (not in warmup)
             self.rt.nonheating_below_target_since = None
 
         # Ramp from current setpoint (or last applied)
@@ -471,17 +496,20 @@ class HeatPumpZone:
 
         # Progressive kick logic: if we're below target but heat pump won't start,
         # progressively increase setpoint every KICK_INTERVAL_SECONDS until heating starts.
-        # Once heating is confirmed (handled above where power_state becomes "heating"),
+        # Once heating is confirmed (warmup complete and still heating),
         # kick_setpoint_c is cleared and we return to normal control.
+        # Don't kick during warmup - HP is starting up, just wait.
         max_allowed_sp = target + float(self.rt.max_offset_c)
         device_step = self.rt.climate_target_temp_step_c
         if device_step is None or device_step <= 0 or device_step > 5:
             device_step = 1.0
 
         # Determine if we should kick (first kick or progressive kick)
+        # Don't kick during warmup - HP is trying to start
         should_first_kick = (
             error > 0
             and nonheating
+            and not in_warmup
             and current_sp is not None
             and self.rt.kick_setpoint_c is None  # not already in kick mode
             and self.rt.nonheating_below_target_since is not None
@@ -491,6 +519,7 @@ class HeatPumpZone:
         should_progressive_kick = (
             error > 0
             and nonheating
+            and not in_warmup
             and current_sp is not None
             and self.rt.kick_setpoint_c is not None  # already in kick mode
             and self.rt.last_kick_at is not None
@@ -525,15 +554,20 @@ class HeatPumpZone:
             desired_setpoint = self.rt.kick_setpoint_c
             self.rt.desired_setpoint_c = desired_setpoint
         else:
-            # Not in kick mode, or room reached target, or heating started
-            if self.rt.kick_setpoint_c is not None and (not nonheating or error <= 0):
-                # Clear kick mode - either heating started or room is satisfied
+            # Not in kick mode, or room reached target, or heating completed
+            # Don't clear kick during warmup - HP isn't actually heating yet
+            if self.rt.kick_setpoint_c is not None and not in_warmup and (not nonheating or error <= 0):
+                # Clear kick mode - heating confirmed (warmup complete) or room is satisfied
                 self.rt.kick_setpoint_c = None
                 self.rt.last_kick_at = None
 
+        # During warmup, hold the setpoint completely - HP is trying to start.
+        if in_warmup and current_sp is not None:
+            ramped = current_sp
+            self.rt.control_status = "warmup_hold"
         # During the hold window after heating starts, don't increase setpoint further.
         # Allow decreases (e.g., if we overshot or target dropped).
-        if (
+        elif (
             current_sp is not None
             and desired_setpoint > current_sp
             and self.rt.heating_start_hold_until is not None

@@ -13,6 +13,7 @@ DEFAULT_MAX_SETPOINT_STEP_C_PER_UPDATE = 0.5  # gentle ramp
 DEFAULT_SETPOINT_MIN_C = 16.0
 DEFAULT_SETPOINT_MAX_C = 32.0
 DEFAULT_HEATING_START_HOLD_SECONDS = 120
+DEFAULT_WARMUP_HOLD_SECONDS = 120  # hold setpoint while HP compressor warms up (fan off, ~500W)
 
 # If the room is below target but the heat pump appears "satisfied" (fan-only/idle/anti-draft),
 # we may need to temporarily push setpoint higher to re-engage heating.
